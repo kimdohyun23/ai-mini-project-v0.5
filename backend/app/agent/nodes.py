@@ -8,9 +8,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 import time
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.types import Send
+
+from app.config import settings
 
 from app.agent.prompts import (
     COMPETITOR_ANALYST_SYSTEM,
@@ -31,20 +35,33 @@ from app.retrieval import index_exists, search_docs, search_web, web_search_enab
 @traced("researcher")
 async def researcher(state: AgentState) -> dict:
     item_id, query = state["item_id"], state["query"]
-
-    if not index_exists(item_id):
-        emit(Progress(node="researcher", message=f"'{item_id}' 문서 인덱스가 없습니다. scripts/ingest.py 를 먼저 실행하세요."))
-    docs = await search_docs(item_id, query, k=4)
-    emit(Progress(node="researcher", message=f"문서 검색 {len(docs)}건"))
-
-    web = []
-    if web_search_enabled():
-        web = await search_web(f"{state['item_name']} {query}", max_results=3)
-        emit(Progress(node="researcher", message=f"웹 검색 {len(web)}건"))
-    else:
-        emit(Progress(node="researcher", message="TAVILY_API_KEY 가 없어 웹 검색을 건너뜁니다."))
-
-    return {"evidence": docs + web}
+    scope = state.get("research_scope", "all")
+    round_number = state.get("research_count", 0) + 1
+    emit(Progress(node="researcher", message=f"검색 {round_number}회차, 범위={scope}"))
+    docs, web = [], []
+    if scope in ("docs", "all"):
+        if not index_exists(item_id):
+            emit(Progress(node="researcher", message=f"'{item_id}' 문서 인덱스가 없습니다. scripts/ingest.py 를 먼저 실행하세요."))
+        docs = await search_docs(item_id, query, k=4)
+        emit(Progress(node="researcher", message=f"문서 검색 {len(docs)}건"))
+    if scope in ("web", "all"):
+        if web_search_enabled():
+            web = await search_web(f"{state['item_name']} {query}", max_results=3)
+            emit(Progress(node="researcher", message=f"웹 검색 {len(web)}건"))
+        else:
+            emit(Progress(node="researcher", message="TAVILY_API_KEY 가 없어 웹 검색을 건너뜁니다. 최신성 확인이 제한됩니다."))
+    evidence = list(state.get("evidence", []))
+    known = {(str(e.get("source", "")), str(e.get("content", ""))) for e in evidence}
+    for entry in docs + web:
+        key = (str(entry.get("source", "")), str(entry.get("content", "")))
+        if key not in known:
+            evidence.append(entry)
+            known.add(key)
+    return {
+        "evidence": evidence,
+        "research_count": round_number,
+        "web_research_count": state.get("web_research_count", 0) + int(scope in ("web", "all")),
+    }
 
 
 # ──────────────────────────────────────────────────────────────
@@ -68,7 +85,7 @@ async def analyze_competitor(state: AgentState, competitor: str) -> dict:
             f"근거 자료:\n{format_evidence(evidence)}"
         )),
     ]
-    analysis = await ainvoke_tracked(messages, node="competitor_analyst")
+    analysis = await ainvoke_tracked(messages, node="competitor_analyst", max_tokens=650)
     return {
         "competitor": competitor,
         "analysis": analysis,
@@ -79,20 +96,48 @@ async def analyze_competitor(state: AgentState, competitor: str) -> dict:
 @traced("competitor_analyst")
 async def competitor_analyst(state: AgentState) -> dict:
     competitors = state.get("competitors", [])
-    emit(Progress(node="competitor_analyst", message=f"분석 대상 {len(competitors)}개 기업: {', '.join(competitors)}"))
+    emit(Progress(node="competitor_analyst", message=f"분석 대상 {len(competitors)}개 기업을 동시에 시작: {', '.join(competitors)}"))
+    return {}
 
-    update: dict = {}
-    for competitor in competitors:
-        emit(BranchStart(node="competitor_analyst", branch=competitor))
-        started = time.perf_counter()
 
-        finding = await analyze_competitor(state, competitor)
-        update["competitor_findings"] = [finding]      # 기업별 분석 결과 저장
+def fan_out_competitors(state: AgentState):
+    competitors = list(dict.fromkeys(state.get("competitors", [])))
+    if not competitors:
+        return "competitor_join"
+    return [Send("competitor_branch", {**state, "competitor": company}) for company in competitors]
 
+
+@traced("competitor_branch")
+async def competitor_branch(state: AgentState) -> dict:
+    company = state["competitor"]
+    emit(BranchStart(node="competitor_analyst", branch=company))
+    started = time.perf_counter()
+    try:
+        finding = await asyncio.wait_for(
+            analyze_competitor(state, company), timeout=settings.competitor_timeout_seconds,
+        )
+        finding["status"] = "success"
+    except Exception as error:
+        # 한 갈래의 실패를 데이터로 남겨 다른 기업 결과와 함께 병합합니다.
+        kind = "timeout" if isinstance(error, TimeoutError) else type(error).__name__
+        emit(Progress(node="competitor_analyst", message=f"{company} 분석 실패 ({kind}). 다른 기업 결과는 보존합니다."))
+        finding = {
+            "competitor": company,
+            "analysis": f"분석 실패 ({kind}). 이 기업의 TRL은 판단할 수 없습니다.",
+            "sources": [], "status": "failed", "error": kind,
+        }
+    finally:
         elapsed = int((time.perf_counter() - started) * 1000)
-        emit(BranchEnd(node="competitor_analyst", branch=competitor, duration_ms=elapsed))
+        emit(BranchEnd(node="competitor_analyst", branch=company, duration_ms=elapsed))
+    return {"competitor_findings": [finding]}
 
-    return update
+
+@traced("competitor_join")
+async def competitor_join(state: AgentState) -> dict:
+    findings = state.get("competitor_findings", [])
+    succeeded = sum(f.get("status") == "success" for f in findings)
+    emit(Progress(node="competitor_analyst", message=f"결과 병합 {len(findings)}/{len(set(state.get('competitors', [])))}개 기업, 성공 {succeeded}, 실패 {len(findings) - succeeded}"))
+    return {"analysis_done": True}
 
 
 # ──────────────────────────────────────────────────────────────

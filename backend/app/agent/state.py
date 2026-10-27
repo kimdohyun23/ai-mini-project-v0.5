@@ -7,7 +7,14 @@ LangGraph가 그 dict를 기존 상태에 반영합니다.
 """
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Annotated, TypedDict
+
+
+def merge_findings(current: list[dict], incoming: list[dict]) -> list[dict]:
+    """회사별 결과를 병합하고 같은 회사의 재전달은 덮어써 중복을 막습니다."""
+    merged = {entry["competitor"]: entry for entry in current}
+    merged.update({entry["competitor"]: entry for entry in incoming})
+    return list(merged.values())
 
 
 class AgentState(TypedDict, total=False):
@@ -20,13 +27,18 @@ class AgentState(TypedDict, total=False):
     test_mode: bool             # 점검용 테스트 모드 (True면 writer가 부실한 결과를 만듦)
 
     # ── Supervisor ──────────────────────
-    plan: list[str]             # 실행할 작업 목록
-    plan_index: int             # 지금까지 진행한 작업 수
+    intent: str                # overview / comparison / latest
+    research_scope: str        # docs / web / all
+    research_count: int        # 재검색 상한을 위한 검색 노드 실행 횟수
+    web_research_count: int     # 최신 정보용 웹 검색 수행 횟수
+    competitor: str            # Send로 전달한 단일 기업
+    analysis_done: bool         # 기업 분석 완료 여부
+    routing_history: list[dict] # 상태에 따른 판단과 이유
     next: str                   # 다음에 실행할 노드 이름
 
     # ── 작업 결과 ────────────────────────
     evidence: list[dict]                # researcher 가 모은 근거 자료
-    competitor_findings: list[dict]     # competitor_analyst 의 경쟁사별 분석 결과
+    competitor_findings: Annotated[list[dict], merge_findings]     # competitor_analyst 의 경쟁사별 분석 결과
     draft: str                          # writer 가 작성한 보고서 초안
 
     # ── 평가 ─────────────────────────────

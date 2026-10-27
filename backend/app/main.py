@@ -23,7 +23,8 @@ from pydantic import BaseModel
 
 from app.agent.graph import graph
 from app.config import get_item, load_items, settings
-from app.events import Done, ErrorEvent, Report, RunStart
+from app.budget import BudgetExceeded, RunBudget, current_budget, partial_report
+from app.events import Done, ErrorEvent, Progress, Report, RunStart, Token
 
 app = FastAPI(title="AI Service Mini Project")
 app.add_middleware(
@@ -82,13 +83,17 @@ async def chat(req: ChatRequest):
         started = time.perf_counter()
         totals = {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_cost_usd": 0.0}
         final_draft = ""
+        last_state = dict(initial_state)
+        budget = RunBudget(settings.llm_cost_limit_usd)
 
         yield to_sse(RunStart(
             run_id=run_id, item_id=req.item_id, item_name=item["name"],
             competitors=item["competitors"], query=req.query, test_mode=test_mode,
         ).model_dump())
 
+        budget_token = current_budget.set(budget)
         try:
+            yield to_sse(Progress(node="supervisor", message=f"실행당 LLM 비용 상한 ${budget.limit:.6f} (호출 전 예약 방식)").model_dump())
             # stream_mode="values" : 각 단계가 끝난 뒤의 상태 전체
             # stream_mode="custom" : 노드 안에서 emit() 으로 보낸 이벤트
             async for mode, payload in graph.astream(
@@ -97,6 +102,7 @@ async def chat(req: ChatRequest):
                 config={"recursion_limit": settings.recursion_limit},
             ):
                 if mode == "values":
+                    last_state = payload
                     final_draft = payload.get("draft", final_draft)
                     continue
                 if payload.get("type") == "llm_usage":
@@ -109,12 +115,20 @@ async def chat(req: ChatRequest):
             REPORTS[run_id] = final_draft
             yield to_sse(Report(run_id=run_id, markdown=final_draft).model_dump())
 
+        except BudgetExceeded as error:
+            final_draft = partial_report(last_state, str(error))
+            REPORTS[run_id] = final_draft
+            yield to_sse(Progress(node="supervisor", message=str(error)).model_dump())
+            yield to_sse(Token(node="writer", text=final_draft).model_dump())
+            yield to_sse(Report(run_id=run_id, markdown=final_draft).model_dump())
         except GraphRecursionError:
             yield to_sse(ErrorEvent(
                 message=f"실행 단계가 상한({settings.recursion_limit})을 넘어 중단되었습니다."
             ).model_dump())
         except Exception as e:  # noqa: BLE001
             yield to_sse(ErrorEvent(message=f"{type(e).__name__}: {e}").model_dump())
+        finally:
+            current_budget.reset(budget_token)
 
         yield to_sse(Done(
             run_id=run_id,
