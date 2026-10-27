@@ -51,6 +51,50 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
         finally:
             current_budget.reset(token)
 
+    async def test_unexpected_usage_overrun_logs_reason_and_stops_last_call(self):
+        budget = RunBudget(0.001)
+        token = current_budget.set(budget)
+        provider = Mock()
+        provider.bind.return_value = provider
+        provider.ainvoke = AsyncMock(
+            return_value=AIMessage(
+                content="provider response",
+                usage_metadata={
+                    "input_tokens": 10000,
+                    "output_tokens": 5,
+                    "total_tokens": 10005,
+                },
+            )
+        )
+        events = []
+        try:
+            with (
+                patch.object(llm, "get_llm", return_value=provider),
+                patch.object(
+                    llm,
+                    "emit",
+                    side_effect=lambda event: events.append(event.model_dump()),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    BudgetExceeded, "공급자가 반환한 토큰 사용량"
+                ):
+                    await llm.ainvoke_tracked(
+                        [HumanMessage(content="test")], node="writer", max_tokens=100
+                    )
+            self.assertTrue(budget.blocked)
+            self.assertGreater(budget.spent, budget.limit)
+            self.assertEqual(budget.reserved, 0)
+            self.assertEqual(len([e for e in events if e["type"] == "llm_usage"]), 1)
+            self.assertTrue(
+                any(
+                    e["type"] == "progress" and "상한 초과로 중단" in e["message"]
+                    for e in events
+                )
+            )
+        finally:
+            current_budget.reset(token)
+
     async def test_denied_call_never_reaches_provider(self):
         budget = RunBudget(0.000001)
         token = current_budget.set(budget)

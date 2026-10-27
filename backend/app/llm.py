@@ -6,7 +6,7 @@ from functools import lru_cache
 from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-from app.budget import Reservation, current_budget
+from app.budget import BudgetExceeded, Reservation, current_budget
 from app.config import PRICING_PER_1M, settings
 from app.events import LlmUsage, Progress, Token, emit
 
@@ -51,6 +51,15 @@ async def _record(node: str, message, reservation: Reservation, uncertain: bool 
     await budget.settle(reservation, cost)
     emit(LlmUsage(node=node, model=settings.llm_model, input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost))
     emit(Progress(node=node, message=f"LLM 누적 예상 비용 ${budget.spent:.6f} / 상한 ${budget.limit:.6f}"))
+    if budget.spent > budget.limit:
+        reason = (
+            f"LLM 비용 상한 초과로 중단: 공급자가 반환한 토큰 사용량으로 정산한 비용이 "
+            f"사전 예약액(${reservation.amount:.6f})을 초과했습니다. "
+            f"이번 호출=${cost:.6f}, 누적=${budget.spent:.6f}, 상한=${budget.limit:.6f}. "
+            "이미 발생한 비용은 되돌릴 수 없어 초과액을 기록하고 추가 호출을 막습니다."
+        )
+        emit(Progress(node=node, message=reason))
+        raise BudgetExceeded(reason)
 
 
 async def ainvoke_tracked(messages: list[BaseMessage], node: str, *, max_tokens: int | None = None, json_mode: bool = False) -> str:
