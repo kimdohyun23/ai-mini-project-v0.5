@@ -1,4 +1,5 @@
 """질문 의도와 작업 결과를 보고 다음 작업과 종료를 결정합니다."""
+
 from __future__ import annotations
 
 import json
@@ -53,11 +54,19 @@ def allowed_actions(state: AgentState) -> list[str]:
     rounds = state.get("research_count", 0)
     if rounds == 0:
         return ["researcher"]
-    if state.get("intent") == "latest" and not state.get("web_research_count") and rounds < MAX_RESEARCH_ROUNDS:
+    if (
+        state.get("intent") == "latest"
+        and not state.get("web_research_count")
+        and rounds < MAX_RESEARCH_ROUNDS
+    ):
         return ["researcher"]
     if not state.get("evidence") and rounds < MAX_RESEARCH_ROUNDS:
         return ["researcher"]
-    if state.get("intent") == "comparison" and not state.get("analysis_done") and state.get("competitors"):
+    if (
+        state.get("intent") == "comparison"
+        and not state.get("analysis_done")
+        and state.get("competitors")
+    ):
         return ["competitor_analyst"]
     actions = ["writer"]
     if rounds < MAX_RESEARCH_ROUNDS:
@@ -70,28 +79,39 @@ def _route(state: AgentState, target: str, reason: str, **update) -> dict:
     return {
         **update,
         "next": target,
-        "routing_history": state.get("routing_history", []) + [{"target": target, "reason": reason}],
+        "routing_history": state.get("routing_history", [])
+        + [{"target": target, "reason": reason}],
     }
 
 
 @traced("supervisor")
 async def supervisor(state: AgentState) -> dict:
-    if state.get("draft"):
+    if "draft" in state:
         if state.get("eval_passed"):
             return _route(state, "end", "작성 결과의 평가 통과를 확인하여 종료")
         if state.get("eval_attempts", 0) >= MAX_WRITER_ATTEMPTS:
-            emit(Progress(node="supervisor", message="작성 시도 상한 도달. 평가 미통과 상태로 종료합니다."))
+            emit(
+                Progress(
+                    node="supervisor",
+                    message="작성 시도 상한 도달. 평가 미통과 상태로 종료합니다.",
+                )
+            )
             return _route(state, "end", "작성 2회 상한 도달, 평가 미통과")
-        return _route(state, "writer", f"평가 미통과로 재작성: {state.get('eval_reason', '')}")
+        return _route(
+            state, "writer", f"평가 미통과로 재작성: {state.get('eval_reason', '')}"
+        )
 
-    # 작성자가 자기 평가하지 않음: 별도 평가 노드 결과를 Supervisor가 보고 재시도를 지시.
-    for stage, target in [("researcher", "researcher"), ("competitor_analyst", "competitor_analyst")]:
+    # 평가 결과에 따라 해당 작업만 재시도한다.
+    for stage in ("researcher", "competitor_analyst"):
         result = state.get("stage_results", {}).get(stage)
         attempts = state.get("stage_attempts", {}).get(stage, 0)
         if result and not result["passed"] and attempts < MAX_STAGE_ATTEMPTS:
-            return _route(state, target, f"{stage} 평가 미통과, 피드백을 전달해 재시도: {result['reason']}")
-    # 중간 평가 상한 이후에도 제한된 결과를 명시하고 최종 평가까지 관찰한다.
-    # 테스트 모드에서 두 중간 단계 및 최종 평가를 모두 검증할 수 있다.
+            return _route(
+                state,
+                stage,
+                f"{stage} 평가 미통과, 피드백을 전달해 재시도: {result['reason']}",
+            )
+    # 중간 평가 상한 이후에는 미통과 상태를 보존하고 다음 단계로 진행한다.
     actions = allowed_actions(state)
     summary = {
         "query": state["query"],
@@ -101,18 +121,28 @@ async def supervisor(state: AgentState) -> dict:
         "web_research_count": state.get("web_research_count", 0),
         "evidence_count": len(state.get("evidence", [])),
         "evidence_preview": [
-            {"source": str(e.get("source", "")), "text": str(e.get("content", ""))[:200]}
+            {
+                "source": str(e.get("source", "")),
+                "text": str(e.get("content", ""))[:200],
+            }
             for e in state.get("evidence", [])[:8]
         ],
         "analysis_done": state.get("analysis_done", False),
         "stage_results": state.get("stage_results", {}),
-        "analyzed_companies": [f.get("competitor") for f in state.get("competitor_findings", [])],
+        "analyzed_companies": [
+            f.get("competitor") for f in state.get("competitor_findings", [])
+        ],
         "allowed_actions": actions,
     }
-    raw = await ainvoke_tracked([
-        SystemMessage(content=ROUTING_SYSTEM),
-        HumanMessage(content=json.dumps(summary, ensure_ascii=False)),
-    ], node="supervisor", max_tokens=350, json_mode=True)
+    raw = await ainvoke_tracked(
+        [
+            SystemMessage(content=ROUTING_SYSTEM),
+            HumanMessage(content=json.dumps(summary, ensure_ascii=False)),
+        ],
+        node="supervisor",
+        max_tokens=350,
+        json_mode=True,
+    )
     # JSON 형식을 벗어난 판단은 잘못된 경로로 실행하지 않고 API 오류로 명시합니다.
     clean = raw.strip()
     if clean.startswith("```") and clean.endswith("```"):
@@ -122,14 +152,18 @@ async def supervisor(state: AgentState) -> dict:
     candidate_state = {**state, "intent": intent}
     actions = allowed_actions(candidate_state)
     if decision.next not in actions:
-        raise ValueError(f"Supervisor가 허용되지 않은 작업을 선택했습니다: {decision.next}; 허용={actions}")
+        raise ValueError(
+            f"Supervisor가 허용되지 않은 작업을 선택했습니다: {decision.next}; 허용={actions}"
+        )
     scope = decision.research_scope
     if decision.next == "researcher":
         if intent == "latest":
             scope = "docs" if not state.get("research_count") else "web"
         elif intent == "comparison":
             scope = "all"
-    return _route(state, decision.next, decision.reason, intent=intent, research_scope=scope)
+    return _route(
+        state, decision.next, decision.reason, intent=intent, research_scope=scope
+    )
 
 
 def route_from_supervisor(state: AgentState) -> str:

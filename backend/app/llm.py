@@ -27,7 +27,7 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
 
 
-async def _reserve(messages: list[BaseMessage], output_limit: int) -> Reservation | None:
+async def _reserve(messages: list[BaseMessage], output_limit: int) -> Reservation:
     budget = current_budget.get()
     if budget is None:
         raise RuntimeError("LLM 호출에는 실행별 RunBudget이 필요합니다.")

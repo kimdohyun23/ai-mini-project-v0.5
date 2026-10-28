@@ -12,6 +12,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentEvent, ItemConfig } from "@/lib/events";
 import { API_BASE, streamChat } from "@/lib/sse";
+import { getCurrentAnswer } from "@/lib/answer";
 
 type TimedRow = { name: string; start: number; duration?: number };
 
@@ -93,7 +94,7 @@ export default function Home() {
         (a, u) => ({ input: a.input + u.input_tokens, output: a.output + u.output_tokens, cost: a.cost + u.cost_usd }),
         { input: 0, output: 0, cost: 0 },
       ),
-      answer: pick("token").map((t) => t.text).join(""),
+      answer: getCurrentAnswer(events),
       report: pick("report").at(-1),
       done: pick("done").at(-1),
     };

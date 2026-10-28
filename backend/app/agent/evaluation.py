@@ -19,8 +19,19 @@ MIN_EVIDENCE = 3
 FAITHFULNESS_THRESHOLD = 0.8
 MAX_JUDGE_CLAIMS = 40
 CITATION = re.compile(r"\[(\d+)\]")
-TRL = re.compile(r"TRL\s*(?:추정|단계|수준)?\s*[:：=]?\s*([1-9])(?!\d)", re.I)
+# 소수, 지수 표기, 분수와 범위를 단일 TRL 값으로 해석하지 않는다.
+TRL = re.compile(
+    r"TRL\s*(?:추정|단계|수준)?\s*[:：=]?\s*([1-9])"
+    r"(?!\d|\.\d|[eE][+-]?\d|\s*[/~〜–—-])",
+    re.I,
+)
 UNKNOWN = re.compile(r"판단\s*불가")
+UNKNOWN_REASON = re.compile(
+    r"(?:근거|자료|정보|검증|출처|시제품|실험|시험|성능|공개|분석|확인|결과)"
+    r"[^.\n:：]*?(?:부족|없|미공개|불가|못|않|실패|불명|어렵|제한|불충분)"
+    r"|\btimeout\b",
+    re.I,
+)
 
 
 def citation_ids(text: str) -> list[int]:
@@ -68,10 +79,7 @@ def globalize_findings(
 
 
 def unknown_with_reason(text: str) -> bool:
-    return bool(
-        UNKNOWN.search(text)
-        and re.search(r"근거|자료|정보|실패|timeout|부족|확인", text, re.I)
-    )
+    return bool(UNKNOWN.search(text) and UNKNOWN_REASON.search(text))
 
 
 def company_sections(draft: str, companies: list[str]) -> dict[str, str]:

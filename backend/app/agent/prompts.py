@@ -1,6 +1,6 @@
-import re
-
 """LLM 프롬프트 모음"""
+
+import re
 
 COMPETITOR_ANALYST_SYSTEM = """당신은 반도체 기술 전략 분석가입니다.
 주어진 근거 자료만 사용하여 특정 기업의 기술 현황을 분석합니다.

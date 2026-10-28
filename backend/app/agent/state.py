@@ -24,7 +24,7 @@ class AgentState(TypedDict, total=False):
     item_name: str
     competitors: list[str]      # 분석 대상 기업 (items.yaml)
     query: str                  # 사용자 질문
-    test_mode: bool             # 점검용 테스트 모드 (True면 writer가 부실한 결과를 만듦)
+    test_mode: bool             # 근거/기업 분석/보고서에 부실 결과를 주입하는 점검 모드
 
     # ── Supervisor ──────────────────────
     intent: str                # overview / comparison / latest

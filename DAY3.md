@@ -79,3 +79,21 @@ uv run --locked python scripts/evaluate_saved_report.py --state /절대경로/st
 ## 한계
 
 출처가 있다는 것과 출처가 신뢰할 만하다는 것은 다르다. 웹 검색 결과 및 PDF 발췌만 평가하므로 원문의 다른 부분을 놓칠 수 있다. LLM Judge의 의미 판단도 틀릴 수 있고 원문 발췌 검사는 의미 정합성을 증명하지 않는다. 주장 분리는 문장/줄 기반이므로 완전한 원자적 주장 분할이 아니다. 정상 보고서라도 미통과일 수 있으며, 평가를 통과시키기 위해 번호를 자동으로 붙이거나 근거를 만들어내지 않는다.
+
+## 재검토 후 수정
+
+- 빈 초안도 작성 결과로 인식해 최초 시도 포함 2회에서 종료한다.
+- TRL의 소수, 지수 표기, 분수와 범위를 정수 단계로 오인하지 않는다.
+- 판단 불가의 사유는 자료 부족이나 미공개 등 설명을 요구하며 빈 항목 이름만으로 통과시키지 않는다.
+- 검색 결과 병합은 merge_evidence를 공통 사용한다. 기업 재시도 피드백은 분석 시작 시 한 번 기록하고 각 기업의 입력에는 계속 전달한다.
+- Frontend는 Writer가 다시 시작하면 이전 초안을 지우고, 마지막 Report 이벤트의 상태와 근거 목록을 반영한다.
+
+Frontend의 이벤트 재생 검증은 설치된 TypeScript와 Node 기본 테스트 도구만 사용한다.
+
+```bash
+frontend/node_modules/.bin/tsc tests/frontend_answer.test.ts --outDir /tmp/ai-mini-day3-tests --rootDir . --module commonjs --target ES2020 --moduleResolution node --types node --typeRoots frontend/node_modules/@types --esModuleInterop --strict --skipLibCheck
+node --test /tmp/ai-mini-day3-tests/tests/frontend_answer.test.js
+frontend/node_modules/.bin/tsc --noEmit --incremental false --project frontend/tsconfig.json
+```
+
+기존 캡처는 이전 커밋의 실행 기록으로 백업한다. 제출용 캡처와 보고서의 실행 정보는 최종 커밋에서 다시 수집한다.
