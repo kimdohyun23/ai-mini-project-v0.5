@@ -257,13 +257,14 @@ async def judge_report(state: dict, claims: list[dict]) -> JudgeVerdict:
         "evidence": format_evidence(state.get("evidence", [])),
         "claims": claims,
     }
+    output_limit = min(2200, 400 + 100 * len(claims))
     raw = await ainvoke_tracked(
         [
             SystemMessage(content=JUDGE_SYSTEM),
             HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
         ],
         node="final_judge",
-        max_tokens=2200,
+        max_tokens=output_limit,
         json_mode=True,
     )
     verdict = JudgeVerdict.model_validate_json(raw)
