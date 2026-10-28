@@ -132,7 +132,7 @@ export default function Home() {
             <button className={testMode ? "ghost" : ""} onClick={() => setTestMode(false)} disabled={running}>정상 모드</button>
             <button className={testMode ? "warn" : "ghost"} onClick={() => setTestMode(true)} disabled={running}>테스트 모드</button>
           </div>
-          {testMode && <p className="muted">테스트 모드 : 보고서 작성 단계가 근거 없는 "부실한 결과"를 만듭니다. 평가 단계 점검용입니다.</p>}
+          {testMode && <p className="muted">테스트 모드: 근거 출처와 기업별 TRL/인용을 누락하고 부실 보고서를 생성합니다. 평가와 재시도 상한 점검용입니다.</p>}
 
           <textarea rows={3} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="질문을 입력하세요" disabled={running} />
           <div className="actions">

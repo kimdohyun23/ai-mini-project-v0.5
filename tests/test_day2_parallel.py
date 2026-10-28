@@ -7,6 +7,16 @@ from app.agent import graph as graph_module
 from app.agent import nodes, supervisor as supervisor_module
 from app.agent.state import merge_findings
 
+
+# DAY3 평가 내용은 test_day3_evaluation에서 검증한다. 이 테스트는 DAY2의 경로/동시성 회귀를 격리한다.
+async def pass_intermediate(state):
+    return {}
+
+
+async def pass_final(state):
+    return {"eval_passed": True, "eval_attempts": 1}
+
+
 BASE = {
     "item_id": "hbf",
     "item_name": "HBF",
@@ -69,6 +79,9 @@ class ParallelTests(unittest.IsolatedAsyncioTestCase):
         events = []
         final = {}
         with (
+            patch.object(graph_module, "research_evaluator", pass_intermediate),
+            patch.object(graph_module, "analysis_evaluator", pass_intermediate),
+            patch.object(graph_module, "step_evaluator", pass_final),
             patch.object(
                 supervisor_module, "ainvoke_tracked", AsyncMock(side_effect=calls)
             ),

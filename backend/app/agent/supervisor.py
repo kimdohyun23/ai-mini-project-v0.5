@@ -7,6 +7,7 @@ from typing import Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict
 
+from app.agent.evaluation import MAX_STAGE_ATTEMPTS
 from app.agent.state import AgentState
 from app.agent.tracing import traced
 from app.events import Progress, Route, emit
@@ -83,6 +84,14 @@ async def supervisor(state: AgentState) -> dict:
             return _route(state, "end", "작성 2회 상한 도달, 평가 미통과")
         return _route(state, "writer", f"평가 미통과로 재작성: {state.get('eval_reason', '')}")
 
+    # 작성자가 자기 평가하지 않음: 별도 평가 노드 결과를 Supervisor가 보고 재시도를 지시.
+    for stage, target in [("researcher", "researcher"), ("competitor_analyst", "competitor_analyst")]:
+        result = state.get("stage_results", {}).get(stage)
+        attempts = state.get("stage_attempts", {}).get(stage, 0)
+        if result and not result["passed"] and attempts < MAX_STAGE_ATTEMPTS:
+            return _route(state, target, f"{stage} 평가 미통과, 피드백을 전달해 재시도: {result['reason']}")
+    # 중간 평가 상한 이후에도 제한된 결과를 명시하고 최종 평가까지 관찰한다.
+    # 테스트 모드에서 두 중간 단계 및 최종 평가를 모두 검증할 수 있다.
     actions = allowed_actions(state)
     summary = {
         "query": state["query"],
@@ -96,6 +105,7 @@ async def supervisor(state: AgentState) -> dict:
             for e in state.get("evidence", [])[:8]
         ],
         "analysis_done": state.get("analysis_done", False),
+        "stage_results": state.get("stage_results", {}),
         "analyzed_companies": [f.get("competitor") for f in state.get("competitor_findings", [])],
         "allowed_actions": actions,
     }

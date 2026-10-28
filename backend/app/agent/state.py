@@ -45,3 +45,11 @@ class AgentState(TypedDict, total=False):
     eval_passed: bool
     eval_reason: str
     eval_attempts: int
+
+    # DAY 3: 단계별 평가 결과와 재시도 피드백
+    stage_attempts: dict[str, int]
+    stage_results: dict[str, dict]
+    stage_feedback: dict[str, str]
+    retry_companies: list[str]
+    final_evaluations: list[dict]
+    judge_audit: dict

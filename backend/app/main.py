@@ -99,7 +99,9 @@ async def chat(req: ChatRequest):
             async for mode, payload in graph.astream(
                 initial_state,
                 stream_mode=["custom", "values"],
-                config={"recursion_limit": settings.recursion_limit},
+                config={"recursion_limit": settings.recursion_limit,
+                        "run_name": f"analysis-{run_id}",
+                        "metadata": {"app_run_id": run_id, "item_id": req.item_id, "test_mode": test_mode}},
             ):
                 if mode == "values":
                     last_state = payload
@@ -112,6 +114,9 @@ async def chat(req: ChatRequest):
                     totals["total_cost_usd"] += payload["cost_usd"]
                 yield to_sse(payload)
 
+            if last_state.get("eval_passed") is False:
+                final_draft = "# 평가 미통과: 검토가 필요한 초안\n\n" + final_draft
+                yield to_sse(Progress(node="supervisor", message="최종 평가 미통과. 통과 보고서가 아닌 검토용 초안으로 보존합니다.").model_dump())
             REPORTS[run_id] = final_draft
             yield to_sse(Report(run_id=run_id, markdown=final_draft).model_dump())
 

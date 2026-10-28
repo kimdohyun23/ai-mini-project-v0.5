@@ -14,17 +14,18 @@ import time
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Send
 
-from app.config import settings
-
+from app.agent.evaluation import globalize_findings
 from app.agent.prompts import (
     COMPETITOR_ANALYST_SYSTEM,
     WRITER_SYSTEM,
+    attach_references,
     format_evidence,
     format_findings,
 )
 from app.agent.state import AgentState
 from app.agent.tracing import traced
-from app.events import BranchEnd, BranchStart, Evaluation, Progress, Token, emit
+from app.config import settings
+from app.events import BranchEnd, BranchStart, Progress, Token, emit
 from app.llm import ainvoke_tracked, astream_tracked
 from app.retrieval import index_exists, search_docs, search_web, web_search_enabled
 
@@ -35,6 +36,10 @@ from app.retrieval import index_exists, search_docs, search_web, web_search_enab
 @traced("researcher")
 async def researcher(state: AgentState) -> dict:
     item_id, query = state["item_id"], state["query"]
+    feedback = state.get("stage_feedback", {}).get("researcher", "")
+    if feedback:
+        emit(Progress(node="researcher", message=f"재시도 입력에 직전 평가 이유 반영: {feedback}"))
+        query += f" 자료 보완 요청: {feedback}"
     scope = state.get("research_scope", "all")
     round_number = state.get("research_count", 0) + 1
     emit(Progress(node="researcher", message=f"검색 {round_number}회차, 범위={scope}"))
@@ -52,6 +57,12 @@ async def researcher(state: AgentState) -> dict:
             emit(Progress(node="researcher", message="TAVILY_API_KEY 가 없어 웹 검색을 건너뜁니다. 최신성 확인이 제한됩니다."))
     evidence = list(state.get("evidence", []))
     known = {(str(e.get("source", "")), str(e.get("content", ""))) for e in evidence}
+    if state.get("test_mode"):
+        emit(Progress(node="researcher", message="[테스트 모드] 실제 검색 결과의 출처를 제거해 중간 평가 실패를 주입합니다."))
+        evidence = []
+        known = set()
+        docs = [{**entry, "source": ""} for entry in docs]
+        web = [{**entry, "source": ""} for entry in web]
     for entry in docs + web:
         key = (str(entry.get("source", "")), str(entry.get("content", "")))
         if key not in known:
@@ -71,6 +82,8 @@ async def researcher(state: AgentState) -> dict:
 # ──────────────────────────────────────────────────────────────
 async def analyze_competitor(state: AgentState, competitor: str) -> dict:
     """기업 하나를 분석해 {"competitor": 기업명, "analysis": 분석 내용, "sources": [...]} 를 돌려줍니다."""
+    if state.get("test_mode"):
+        return {"competitor": competitor, "analysis": "현황 요약: 여러 기업이 기술을 개발하고 있습니다.", "sources": [], "evidence": []}
     item_name = state["item_name"]
     search_query = f"{competitor} {item_name}"
 
@@ -78,11 +91,14 @@ async def analyze_competitor(state: AgentState, competitor: str) -> dict:
     web = await search_web(search_query, max_results=2)
     evidence = docs + web
 
+    feedback = state.get("stage_feedback", {}).get("competitor_analyst", "")
+    if feedback:
+        emit(Progress(node="competitor_analyst", message=f"{competitor} 재시도 입력에 직전 평가 이유 반영: {feedback}"))
     messages = [
         SystemMessage(content=COMPETITOR_ANALYST_SYSTEM),
         HumanMessage(content=(
             f"분석 아이템: {item_name}\n분석 대상 기업: {competitor}\n\n"
-            f"근거 자료:\n{format_evidence(evidence)}"
+            f"근거 자료:\n{format_evidence(evidence)}\n\n직전 평가 피드백: {feedback or '없음'}"
         )),
     ]
     analysis = await ainvoke_tracked(messages, node="competitor_analyst", max_tokens=650)
@@ -90,18 +106,22 @@ async def analyze_competitor(state: AgentState, competitor: str) -> dict:
         "competitor": competitor,
         "analysis": analysis,
         "sources": [e["source"] for e in evidence],
+        "evidence": evidence,
     }
 
 
 @traced("competitor_analyst")
 async def competitor_analyst(state: AgentState) -> dict:
-    competitors = state.get("competitors", [])
+    competitors = state.get("retry_companies") or state.get("competitors", [])
+    feedback = state.get("stage_feedback", {}).get("competitor_analyst", "")
+    if feedback:
+        emit(Progress(node="competitor_analyst", message=f"재시도 입력에 직전 평가 이유 반영: {feedback}"))
     emit(Progress(node="competitor_analyst", message=f"분석 대상 {len(competitors)}개 기업을 동시에 시작: {', '.join(competitors)}"))
     return {}
 
 
 def fan_out_competitors(state: AgentState):
-    competitors = list(dict.fromkeys(state.get("competitors", [])))
+    competitors = list(dict.fromkeys(state.get("retry_companies") or state.get("competitors", [])))
     if not competitors:
         return "competitor_join"
     return [Send("competitor_branch", {**state, "competitor": company}) for company in competitors]
@@ -137,7 +157,8 @@ async def competitor_join(state: AgentState) -> dict:
     findings = state.get("competitor_findings", [])
     succeeded = sum(f.get("status") == "success" for f in findings)
     emit(Progress(node="competitor_analyst", message=f"결과 병합 {len(findings)}/{len(set(state.get('competitors', [])))}개 기업, 성공 {succeeded}, 실패 {len(findings) - succeeded}"))
-    return {"analysis_done": True}
+    evidence, converted = globalize_findings(state.get("evidence", []), findings)
+    return {"analysis_done": True, "evidence": evidence, "competitor_findings": converted}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -157,9 +178,12 @@ POOR_OUTPUT_SAMPLE = (
 
 @traced("writer")
 async def writer(state: AgentState) -> dict:
-    # 점검용 테스트 모드: 근거 없이 일반론만 담긴 "부실한 결과"를 만듭니다.
+    feedback = state.get("eval_reason", "") if state.get("eval_attempts") else ""
+    if feedback:
+        emit(Progress(node="writer", message=f"재작성 입력에 직전 평가 이유 반영: {feedback}"))
+    # 테스트용 고정 부실 결과에도 피드백이 전달되었음을 기록. 고의 실패 주입은 유지.
     if state.get("test_mode"):
-        emit(Progress(node="writer", message="[테스트 모드] 부실한 중간 결과를 생성합니다."))
+        emit(Progress(node="writer", message="[테스트 모드] 피드백을 수신한 뒤 고정 부실 보고서를 다시 생성합니다."))
         emit(Token(node="writer", text=POOR_OUTPUT_SAMPLE))
         return {"draft": POOR_OUTPUT_SAMPLE}
 
@@ -170,31 +194,10 @@ async def writer(state: AgentState) -> dict:
             f"분석 아이템: {state['item_name']}\n"
             f"분석 대상 기업: {', '.join(state.get('competitors', []))}\n\n"
             f"근거 자료:\n{format_evidence(state.get('evidence', []))}\n\n"
-            f"경쟁사 분석 결과:\n{format_findings(state.get('competitor_findings', []))}"
+            f"경쟁사 분석 결과:\n{format_findings(state.get('competitor_findings', []))}\n\n"
+            f"중간 단계 평가: {state.get('stage_results', {})}\n"
+            f"직전 최종 평가 피드백: {feedback or '없음'}"
         )),
     ]
     draft = await astream_tracked(messages, node="writer")
-    return {"draft": draft}
-
-
-# ──────────────────────────────────────────────────────────────
-# step_evaluator : 보고서 평가
-#  - 통과하면 종료, 통과하지 못하면 writer 가 다시 작성합니다.
-# ──────────────────────────────────────────────────────────────
-MIN_REPORT_CHARS = 300
-
-
-@traced("step_evaluator")
-async def step_evaluator(state: AgentState) -> dict:
-    draft = state.get("draft", "")
-    attempt = state.get("eval_attempts", 0) + 1
-
-    passed = len(draft.strip()) >= MIN_REPORT_CHARS
-    reason = "보고서 분량 충족" if passed else f"보고서 분량 부족 ({len(draft.strip())}자)"
-
-    emit(Evaluation(stage="report", passed=passed, reason=reason, attempt=attempt))
-    return {"eval_passed": passed, "eval_reason": reason, "eval_attempts": attempt}
-
-
-def route_after_evaluation(state: AgentState) -> str:
-    return "end" if state.get("eval_passed") else "writer"
+    return {"draft": attach_references(draft, state.get("evidence", []))}
