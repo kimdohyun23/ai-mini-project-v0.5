@@ -296,7 +296,7 @@ def judge_response_schema(claims: list[dict]) -> dict:
         "uncertainty_reason": {"type": "string"},
         "claims": {
             "type": "object",
-            "properties": {i: claim for i in ids},
+            "properties": {i: {"$ref": "#/$defs/claim"} for i in ids},
             "required": ids,
             "additionalProperties": False,
         },
@@ -305,6 +305,7 @@ def judge_response_schema(claims: list[dict]) -> dict:
         "name": "report_verdict",
         "strict": True,
         "schema": {
+            "$defs": {"claim": claim},
             "type": "object",
             "properties": properties,
             "required": list(properties),

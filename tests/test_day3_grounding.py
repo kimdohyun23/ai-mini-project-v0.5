@@ -53,6 +53,8 @@ class JudgeGroundingTests(unittest.IsolatedAsyncioTestCase):
         claim_keys = schema["schema"]["properties"]["claims"]
         self.assertEqual(claim_keys["required"], ["2", "7"])
         self.assertFalse(claim_keys["additionalProperties"])
+        self.assertEqual(claim_keys["properties"]["2"], {"$ref": "#/$defs/claim"})
+        self.assertIn("claim", schema["schema"]["$defs"])
         budget = RunBudget(0.01)
         token = current_budget.set(budget)
         provider = AsyncMock()
