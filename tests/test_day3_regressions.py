@@ -20,6 +20,13 @@ class EvaluationBoundaryTests(unittest.TestCase):
                 )
         self.assertEqual(evaluation.check_company("TRL 추정: 3. 개념 연구 [1]", 1), [])
 
+    def test_markdown_bullet_after_trl_is_not_a_numeric_range(self):
+        for value in range(1, 10):
+            with self.subTest(value=value):
+                text = f"- TRL 추정: {value}\n\n- 추정 근거: 개념 검증 자료 [1]"
+                self.assertEqual(evaluation.check_company(text, 1), [])
+        self.assertTrue(evaluation.check_company("TRL 추정: 3 - 4 [1]", 1))
+
     def test_empty_unknown_reason_is_rejected(self):
         for text in [
             "TRL 추정: 판단 불가\n추정 근거:",
@@ -139,6 +146,49 @@ class RetryBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["eval_attempts"], 2)
         self.assertEqual(result["next"], "end")
         self.assertFalse(result["eval_passed"])
+
+    async def test_invalid_judge_boolean_is_rejected_with_bounded_panel_messages(self):
+        state = {
+            "query": "기업 비교",
+            "intent": "comparison",
+            "competitors": ["A"],
+            "draft": nodes.POOR_OUTPUT_SAMPLE,
+        }
+        claims = evaluation.extract_claims(state["draft"])
+        response = {
+            "relevant": True,
+            "relevance_reason": "관련 있음",
+            "uncertainty": True,
+            "uncertainty_reason": "한계 있음",
+            "claims": [
+                {
+                    "id": c["id"],
+                    "supported": False,
+                    "cited_support": [],
+                    "reason": "근거 없음",
+                }
+                for c in claims
+            ],
+        }
+        events = []
+        with (
+            patch.object(
+                evaluation,
+                "ainvoke_tracked",
+                AsyncMock(return_value=json.dumps(response)),
+            ),
+            patch.object(
+                evaluation, "emit", lambda event: events.append(event.model_dump())
+            ),
+        ):
+            result = await evaluation.step_evaluator(state)
+        self.assertFalse(result["eval_passed"])
+        self.assertEqual(len(result["judge_audit"]["error_details"]), len(claims))
+        for event in events:
+            if event.get("stage", "").startswith("final:"):
+                self.assertFalse(event["passed"])
+                self.assertLess(len(event["reason"]), 400)
+                self.assertNotIn("https://errors.pydantic.dev", event["reason"])
 
     async def test_retry_feedback_logged_once_for_parallel_company_analysis(self):
         state = {

@@ -6,7 +6,7 @@ import json
 import re
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from app.agent.prompts import format_evidence
 from app.agent.tracing import traced
@@ -22,7 +22,7 @@ CITATION = re.compile(r"\[(\d+)\]")
 # 소수, 지수 표기, 분수와 범위를 단일 TRL 값으로 해석하지 않는다.
 TRL = re.compile(
     r"TRL\s*(?:추정|단계|수준)?\s*[:：=]?\s*([1-9])"
-    r"(?!\d|\.\d|[eE][+-]?\d|\s*[/~〜–—-])",
+    r"(?!\d|\.\d|[eE][+-]?\d|[ \t]*[/~〜–—-])",
     re.I,
 )
 UNKNOWN = re.compile(r"판단\s*불가")
@@ -401,6 +401,7 @@ async def step_evaluator(state: dict) -> dict:
     attempt = state.get("eval_attempts", 0) + 1
     claims = extract_claims(state.get("draft", ""))
     verdict, error = None, ""
+    error_details = []
     try:
         if not claims or len(claims) > MAX_JUDGE_CLAIMS:
             raise ValueError(
@@ -425,12 +426,19 @@ async def step_evaluator(state: dict) -> dict:
                 )
             )
         raise
+    except ValidationError as exc:
+        error_details = exc.errors(include_url=False, include_input=False)
+        locations = [".".join(map(str, item["loc"])) for item in error_details]
+        error = (
+            f"Judge 응답 형식 오류 {len(error_details)}건: {', '.join(locations[:3])}"
+        )
     except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
+        error = f"{type(exc).__name__}: {exc}"[:300]
+    if error:
         emit(
             Progress(
                 node="step_evaluator",
-                message=f"Judge 응답 검증 실패, 의미 평가를 통과시키지 않습니다: {error}",
+                message=f"Judge 평가 실패, 미검증 항목을 통과시키지 않습니다: {error}",
             )
         )
     results = final_results(state, claims, verdict, error)
@@ -465,5 +473,6 @@ async def step_evaluator(state: dict) -> dict:
             "claims": claims,
             "verdict": verdict.model_dump() if verdict else None,
             "error": error,
+            "error_details": error_details,
         },
     }
