@@ -192,7 +192,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIn("Samsung TRL 누락", llm.call_args.args[0][1].content)
 
-    async def test_quote_must_come_from_actual_evidence_and_match_cited_ids(self):
+    async def test_selected_span_must_come_from_actual_evidence(self):
         evidence = [
             {
                 "kind": "doc",
@@ -202,12 +202,9 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
         claims = [{"id": 1, "text": "대용량을 지원합니다.[1]", "citations": [1]}]
-        for quote, expected in [
-            ("High Bandwidth Flash supports large memory capacity.", True),
-            ("LLM invented quotation about capacity", False),
-        ]:
+        for reference, expected in [("E1:S1", True), ("E1:S99", False)]:
             data = verdict_for(claims).model_dump()
-            data["claims"][0].update(supporting_ids=[1], quote=quote)
+            data["claims"][0].update(supporting_refs=[reference])
             with patch.object(
                 ev, "ainvoke_tracked", AsyncMock(return_value=json.dumps(data))
             ):

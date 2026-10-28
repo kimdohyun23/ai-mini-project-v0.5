@@ -2,6 +2,8 @@
 
 import re
 
+from app.agent.citations import citation_ids
+
 COMPETITOR_ANALYST_SYSTEM = """당신은 반도체 기술 전략 분석가입니다.
 주어진 근거 자료만 사용하여 특정 기업의 기술 현황을 분석합니다.
 근거 자료에 없는 내용은 추측하지 말고 "근거 부족"이라고 쓰세요.
@@ -71,7 +73,7 @@ def attach_references(draft: str, evidence: list[dict]) -> str:
     body = re.split(r"(?m)^##\s+(?:근거 목록|참고.*|출처.*)\n", draft, maxsplit=1)[
         0
     ].rstrip()
-    ids = sorted({int(n) for n in re.findall(r"\[(\d+)\]", body)})
+    ids = sorted(set(citation_ids(body)))
     references = [
         f"[{i}] {evidence[i - 1].get('title', '')} | {evidence[i - 1].get('source', '')}"
         for i in ids
