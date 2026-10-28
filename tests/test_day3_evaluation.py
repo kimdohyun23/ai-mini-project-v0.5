@@ -205,6 +205,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         for reference, expected in [("E1:S1", True), ("E1:S99", False)]:
             data = verdict_for(claims).model_dump()
             data["claims"][0].update(supporting_refs=[reference])
+            data["claims"] = {str(r.pop("id")): r for r in data["claims"]}
             with patch.object(
                 ev, "ainvoke_tracked", AsyncMock(return_value=json.dumps(data))
             ):
@@ -230,6 +231,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
                 dict(id=i, supported=True, cited_support=True, reason="검증")
                 for i in ids
             ]
+            raw["claims"] = {str(r.pop("id")): r for r in raw["claims"]}
             with patch.object(
                 ev, "ainvoke_tracked", AsyncMock(return_value=json.dumps(raw))
             ):

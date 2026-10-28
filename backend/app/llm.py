@@ -1,6 +1,7 @@
 """LLM 호출 전에 비용을 예약하고 사용량과 예상 비용을 기록합니다."""
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 
 from langchain_core.messages import BaseMessage
@@ -27,13 +28,15 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
 
 
-async def _reserve(messages: list[BaseMessage], output_limit: int) -> Reservation:
+async def _reserve(messages: list[BaseMessage], output_limit: int, response_schema: dict | None = None) -> Reservation:
     budget = current_budget.get()
     if budget is None:
         raise RuntimeError("LLM 호출에는 실행별 RunBudget이 필요합니다.")
     # 현재 API는 텍스트 메시지만 사용합니다. UTF-8 바이트 수에 메시지/역할 여유분을
     # 더해 입력 토큰을 보수적으로 예약하고, 응답 후 사용량 메타데이터로 정산합니다.
     input_bound = 256 + sum(len((message.type + str(message.content)).encode("utf-8")) + 32 for message in messages)
+    if response_schema:
+        input_bound += len(json.dumps(response_schema, ensure_ascii=False).encode("utf-8")) + 256
     return await budget.reserve(settings.llm_model, input_bound, output_limit)
 
 
@@ -62,11 +65,15 @@ async def _record(node: str, message, reservation: Reservation, uncertain: bool 
         raise BudgetExceeded(reason)
 
 
-async def ainvoke_tracked(messages: list[BaseMessage], node: str, *, max_tokens: int | None = None, json_mode: bool = False) -> str:
+async def ainvoke_tracked(messages: list[BaseMessage], node: str, *, max_tokens: int | None = None, json_mode: bool = False, response_schema: dict | None = None) -> str:
     output_limit = max_tokens or settings.llm_max_output_tokens
-    reservation = await _reserve(messages, output_limit)
+    if json_mode and response_schema:
+        raise ValueError("JSON 모드와 응답 스키마는 동시에 지정할 수 없습니다.")
+    reservation = await _reserve(messages, output_limit, response_schema)
     options = {"max_tokens": output_limit}
-    if json_mode:
+    if response_schema:
+        options["response_format"] = {"type": "json_schema", "json_schema": response_schema}
+    elif json_mode:
         options["response_format"] = {"type": "json_object"}
     response = None
     try:

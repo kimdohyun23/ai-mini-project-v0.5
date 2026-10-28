@@ -2,8 +2,10 @@
 
 import json
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+from app import llm
+from app.budget import BudgetExceeded, RunBudget, current_budget
 from app.agent import evaluation as ev
 from app.agent.prompts import attach_references
 
@@ -46,6 +48,51 @@ class CitationFormatTests(unittest.TestCase):
 
 
 class JudgeGroundingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_schema_is_forwarded_with_exact_claim_keys(self):
+        schema = ev.judge_response_schema([{"id": 2}, {"id": 7}])
+        claim_keys = schema["schema"]["properties"]["claims"]
+        self.assertEqual(claim_keys["required"], ["2", "7"])
+        self.assertFalse(claim_keys["additionalProperties"])
+        budget = RunBudget(0.01)
+        token = current_budget.set(budget)
+        provider = AsyncMock()
+        provider.bind = Mock(return_value=provider)
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        provider.ainvoke.return_value = AIMessage(
+            content="{}",
+            usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+        try:
+            with patch.object(llm, "get_llm", return_value=provider):
+                await llm.ainvoke_tracked(
+                    [HumanMessage(content="test")], node="judge", response_schema=schema
+                )
+            self.assertEqual(
+                provider.bind.call_args.kwargs["response_format"],
+                {"type": "json_schema", "json_schema": schema},
+            )
+            self.assertEqual(budget.reserved, 0)
+        finally:
+            current_budget.reset(token)
+
+    async def test_schema_input_cost_is_reserved_before_provider_call(self):
+        budget = RunBudget(0.0001)
+        token = current_budget.set(budget)
+        try:
+            with patch.object(llm, "get_llm") as provider:
+                with self.assertRaises(BudgetExceeded):
+                    await llm.ainvoke_tracked(
+                        [],
+                        node="judge",
+                        max_tokens=1,
+                        response_schema={"description": "x" * 10000},
+                    )
+                provider.assert_not_called()
+            self.assertEqual(budget.spent, 0)
+        finally:
+            current_budget.reset(token)
+
     async def judge(self, *, refs, citations=(1,), supported=True, cited=True):
         state = dict(
             query="용량 설명",
@@ -74,6 +121,7 @@ class JudgeGroundingTests(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
+        response["claims"] = {str(r.pop("id")): r for r in response["claims"]}
         with patch.object(
             ev, "ainvoke_tracked", AsyncMock(return_value=json.dumps(response))
         ) as llm:

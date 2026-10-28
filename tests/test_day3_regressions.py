@@ -170,6 +170,7 @@ class RetryBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 for c in claims
             ],
         }
+        response["claims"] = {str(r.pop("id")): r for r in response["claims"]}
         events = []
         with (
             patch.object(

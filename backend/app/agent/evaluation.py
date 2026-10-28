@@ -270,8 +270,47 @@ supported=false이면 supporting_refs=[]입니다. 지지할 발췌가 없으면
 relevant는 질문의 핵심 요구에 직접 답하는지, uncertainty는 구체적 한계 공개가 있고 근거 없는 수치 TRL 단정이 없는지입니다.
 단순히 한계라는 제목이 있거나 일반론 한 문장이 있다는 이유로 uncertainty=true로 두지 마세요.
 주장 ID를 누락/추가/중복하거나 문장을 재분할하지 마세요. 짧은 한국어 이유를 쓰세요.
-JSON만 반환: {"relevant":true,"relevance_reason":"...","uncertainty":false,"uncertainty_reason":"...","claims":[{"id":1,"supported":true,"cited_support":true,"reason":"선택한 발췌가 주장 전체를 지지함","supporting_refs":["E1:S1"]}]}.
+claims는 입력의 주장 ID를 문자열 키로 사용하는 객체입니다. 주장 목록을 재분할하지 마세요.
+JSON만 반환: {"relevant":true,"relevance_reason":"...","uncertainty":false,"uncertainty_reason":"...","claims":{"1":{"supported":true,"cited_support":true,"reason":"선택한 발췌가 주장 전체를 지지함","supporting_refs":["E1:S1"]}}}.
 """
+
+
+def judge_response_schema(claims: list[dict]) -> dict:
+    """입력 주장 ID를 필수 객체 키로 고정해 누락과 임의 분할을 막는다."""
+    claim = {
+        "type": "object",
+        "properties": {
+            "supported": {"type": "boolean"},
+            "cited_support": {"type": "boolean"},
+            "reason": {"type": "string"},
+            "supporting_refs": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["supported", "cited_support", "reason", "supporting_refs"],
+        "additionalProperties": False,
+    }
+    ids = [str(c["id"]) for c in claims]
+    properties = {
+        "relevant": {"type": "boolean"},
+        "relevance_reason": {"type": "string"},
+        "uncertainty": {"type": "boolean"},
+        "uncertainty_reason": {"type": "string"},
+        "claims": {
+            "type": "object",
+            "properties": {i: claim for i in ids},
+            "required": ids,
+            "additionalProperties": False,
+        },
+    }
+    return {
+        "name": "report_verdict",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": properties,
+            "required": list(properties),
+            "additionalProperties": False,
+        },
+    }
 
 
 async def judge_report(state: dict, claims: list[dict]) -> JudgeVerdict:
@@ -290,14 +329,16 @@ async def judge_report(state: dict, claims: list[dict]) -> JudgeVerdict:
         ],
         node="final_judge",
         max_tokens=output_limit,
-        json_mode=True,
+        response_schema=judge_response_schema(claims),
     )
-    verdict = JudgeVerdict.model_validate_json(raw)
-    returned_ids = [c.id for c in verdict.claims]
-    if len(returned_ids) != len(set(returned_ids)) or set(returned_ids) != {
-        c["id"] for c in claims
+    data = json.loads(raw)
+    judgments = data.get("claims") if isinstance(data, dict) else None
+    if not isinstance(judgments, dict) or set(judgments) != {
+        str(c["id"]) for c in claims
     }:
         raise ValueError("Judge 주장 ID가 입력과 불일치: 누락/추가/중복")
+    data["claims"] = [{"id": c["id"], **judgments[str(c["id"])]} for c in claims]
+    verdict = JudgeVerdict.model_validate(data)
     span_sources = {
         span["id"]: item["id"] for item in catalog for span in item["spans"]
     }
